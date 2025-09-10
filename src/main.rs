@@ -15,7 +15,7 @@ use ratatui::{
     Frame,
 };
 
-static UI_UPDATE_RATE_MS: u64 = 80;
+static UI_UPDATE_RATE_MS: u64 = 110;
 
 #[derive(Clone)]
 struct Time {
@@ -36,17 +36,18 @@ impl Time {
     }
 }
 
-#[derive(Clone)]
 struct Timer {
-    time: Arc<Mutex<Time>>,
+    timer_state: Arc<Mutex<Time>>,
     label: Option<String>,
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Timer {
     fn new(label: Option<String>) -> Self {
         Self {
-            time: Arc::new(Mutex::new(Time::new())),
+            timer_state: Arc::new(Mutex::new(Time::new())),
             label,
+            task_handle: None,
         }
     }
 }
@@ -86,6 +87,11 @@ impl State {
 
     fn remove_timer(&mut self) {
         if self.timers.len() > 1 {
+            match &self.timers[self.selected_timer].task_handle {
+                Some(handle) => handle.abort(),
+                None => {}
+            }
+
             self.timers.remove(self.selected_timer);
             if self.selected_timer >= self.timers.len() {
                 self.selected_timer = self.timers.len() - 1;
@@ -250,7 +256,7 @@ fn draw_timer(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time
         Color::Gray
     };
 
-    let mut title = format!(" Timer {} ", index + 1);
+    let title = format!(" Timer {} ", index + 1);
     let time_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
@@ -321,21 +327,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::init();
     let mut state = State::new();
 
-    for timer in &state.timers {
-        let counter_time = Arc::clone(&timer.time);
+    // only iterates once because we only have one timer rn, might implement multiple args later
+    for timer in &mut state.timers {
+        let time_counter = Arc::clone(&timer.timer_state);
 
-        tokio::spawn(async move {
-            counter(counter_time).await;
+        let handle = tokio::spawn(async move {
+            counter(time_counter).await;
         });
-    }
-    let mut interval = time::interval_at(Instant::now(), Duration::from_millis(UI_UPDATE_RATE_MS));
 
+        timer.task_handle = Some(handle)
+    }
+
+    let mut interval = time::interval_at(Instant::now(), Duration::from_millis(UI_UPDATE_RATE_MS));
     loop {
         interval.tick().await;
 
+        // take snapshots of all timer states so we can draw them for next frame
         let mut time_snapshots = Vec::new();
         for timer in &state.timers {
-            let time_guard = timer.time.lock().await;
+            let time_guard = timer.timer_state.lock().await;
             time_snapshots.push(time_guard.clone());
         }
 
@@ -352,7 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })?;
 
-        if crossterm::event::poll(Duration::from_millis(UI_UPDATE_RATE_MS))? {
+        if crossterm::event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
                 if state.input_mode {
                     match key.code {
@@ -378,12 +388,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if state.timers.len() < 6 {
                                 state.add_timer();
 
-                                let timer = &state.timers[state.timers.len() - 1];
-                                let counter_time = Arc::clone(&timer.time);
+                                let idx = state.timers.len() - 1;
+                                let timer = &mut state.timers[idx];
 
-                                tokio::spawn(async move {
+                                let counter_time = Arc::clone(&timer.timer_state);
+                                let handle = tokio::spawn(async move {
                                     counter(counter_time).await;
                                 });
+
+                                timer.task_handle = Some(handle);
                             }
                         },
                         KeyCode::Char('d') => {
