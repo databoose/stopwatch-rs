@@ -5,6 +5,7 @@ use tokio::time::{interval_at, Duration, Instant};
 use tokio::time;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::enable_raw_mode;
 use ratatui::widgets::Padding;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -15,7 +16,7 @@ use ratatui::{
     Frame,
 };
 
-static UI_UPDATE_RATE_MS: u64 = 110;
+static UI_UPDATE_RATE_MS: u64 = 90;
 
 #[derive(Clone)]
 struct Time {
@@ -106,16 +107,6 @@ impl State {
     fn next_timer(&mut self) {
         if !self.timers.is_empty() {
             self.selected_timer = (self.selected_timer + 1) % self.timers.len(); // wraps around, moves from timer 0 → 1 → 2 → 3 → back to 0
-        }
-    }
-
-    fn prev_timer(&mut self) {
-        if !self.timers.is_empty() {
-            if self.selected_timer == 0 {
-                self.selected_timer = self.timers.len() - 1;
-            } else {
-                self.selected_timer -= 1;
-            }
         }
     }
 
@@ -264,7 +255,7 @@ fn draw_timer(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time
         .padding(Padding::uniform(1));
 
     let time_display = if app.input_mode && is_selected {
-        format!("Label: {}_", app.input_buffer)
+        format!("Label: {}_", app.input_buffer) // TDOD : add input mode text wrapping for long labels
     } else {
         let time_str = format!(
             "{}d:{}h:{}m:{}s",
@@ -292,11 +283,10 @@ fn draw_help(frame: &mut Frame) {
     let area = frame.area();
     let help_text = vec![
         "Shortcuts:",
-        "  q     - Quit",
-        "  a     - Add timer (max 6)",
-        "  d     - Delete selected timer",
+        "  crtl + q     - Quit",
+        "  crtl + a     - Add timer (max 6)",
+        "  ctrl + d     - Delete selected timer",
         "  tab   - Next timer",
-        "  s-tab - Previous timer",
         "  l     - Set label for timer",
         "  h     - Toggle help",
         "  esc   - Cancel input",
@@ -322,8 +312,10 @@ fn draw_help(frame: &mut Frame) {
     frame.render_widget(help_paragraph, help_area);
 }
 
-#[tokio::main]
+// since the only explicit tasks we spawn are simple counters, we can use lower threadcount than normal tbh
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    enable_raw_mode()?;
     let mut terminal = ratatui::init();
     let mut state = State::new();
 
@@ -383,8 +375,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('a') => {
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if state.timers.len() < 6 {
                                 state.add_timer();
 
@@ -399,27 +391,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 timer.task_handle = Some(handle);
                             }
                         },
-                        KeyCode::Char('d') => {
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if state.timers.len() > 1 {
                                 state.remove_timer();
                             }
                         },
-                        KeyCode::Char('h') => {
+                        KeyCode::Char('h') => {  // No modifier check for 'h'
                             state.toggle_help();
-                        },
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                state.prev_timer();
-                            } else {
-                                state.next_timer();
-                            }
-                        },
-                        KeyCode::BackTab => {
-                            state.prev_timer();
                         },
                         KeyCode::Char('l') => {
                             state.input_mode = true;
                             state.input_buffer.clear();
+                        },
+                        KeyCode::Tab => {
+                            state.next_timer();
                         },
                         _ => {}
                     }
