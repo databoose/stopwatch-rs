@@ -10,8 +10,8 @@ use ratatui::widgets::Padding;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Alignment,
-    style::{Color, Style, Stylize},
-    text::Span,
+    style::{Color, Style},
+    text::{Span, Line},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
@@ -239,7 +239,8 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
     }
 }
 
-fn draw_timer(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time, index: usize, is_selected: bool, app: &State) {
+fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time, index: usize, state: &State) {
+    let is_selected = index == state.selected_timer;
     let border_color = if is_selected {
         Color::Green
     }
@@ -254,8 +255,8 @@ fn draw_timer(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time
         .title(title)
         .padding(Padding::uniform(1));
 
-    let time_display = if app.input_mode && is_selected {
-        format!("Label: {}_", app.input_buffer) // TDOD : add input mode text wrapping for long labels
+    let time_display = if state.input_mode && is_selected {
+        format!("Label: {}_", state.input_buffer) // TDOD : add input mode text wrapping for long labels
     } else {
         let time_str = format!(
             "{}d:{}h:{}m:{}s",
@@ -265,7 +266,7 @@ fn draw_timer(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time
             time_snapshot.second
         );
 
-        match timer.label.as_ref() {
+        match &timer.label {
             None => time_str,
             Some(label) => format!("{}\n{}", time_str, label),
         }
@@ -277,6 +278,46 @@ fn draw_timer(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time
         .block(time_block);
 
     frame.render_widget(time_text, area);
+}
+
+fn draw_confirmation_prompt(frame: &mut Frame) {
+    let area = frame.area();
+
+    let line = Line::from(vec![
+            Span::raw("Are you sure? "),
+            Span::styled(
+                "Y",
+                Color::Green,
+            ),
+            Span::styled(
+                "/",
+                Color::Gray,
+            ),
+            Span::styled(
+                "N",
+                Color::Red,
+            ),
+    ]);
+
+    let prompt_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+        .title(" Confirmation ");
+
+    let prompt_paragraph = Paragraph::new(line)
+        .block(prompt_block)
+        .centered()
+        .style(Style::default().fg(Color::Gray).bg(Color::Black));
+
+    let prompt_area = Rect {
+        x: area.width / 4,
+        y: area.height / 4,
+
+        width: area.width / 2,
+        height: area.width / 14,
+    };
+
+    frame.render_widget(prompt_paragraph, prompt_area);
 }
 
 fn draw_help(frame: &mut Frame) {
@@ -331,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut interval = time::interval_at(Instant::now(), Duration::from_millis(UI_UPDATE_RATE_MS));
-    loop {
+    'main_loop: loop {
         interval.tick().await;
 
         // take snapshots of all timer states so we can draw them for next frame
@@ -345,8 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let areas = get_layout_areas(frame, state.timers.len());
 
             for i in 0..state.timers.len() {
-                let is_selected = i == state.selected_timer;
-                draw_timer(frame, areas[i], &state.timers[i], &time_snapshots[i], i, is_selected, &state);
+                draw_timer_box(frame, areas[i], &state.timers[i], &time_snapshots[i], i, &state);
             }
 
             if state.show_help {
@@ -375,7 +415,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            'confirm_loop: loop {
+                                terminal.draw(|frame| { draw_confirmation_prompt(frame); })?;
+                                if let Event::Key(key) = event::read()? {
+                                        match key.code {
+                                            KeyCode::Char('y') => break 'main_loop,
+                                            KeyCode::Char('n') => break 'confirm_loop,
+                                            _ => continue
+                                        }
+                                }
+                            }
+                        },
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if state.timers.len() < 6 {
                                 state.add_timer();
