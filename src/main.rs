@@ -324,8 +324,8 @@ fn draw_help(frame: &mut Frame) {
     let area = frame.area();
     let help_text = vec![
         "Shortcuts:",
-        "  crtl + q     - Quit",
-        "  crtl + a     - Add timer (max 6)",
+        "  ctrl + q     - Quit",
+        "  ctrl + a     - Add timer (max 6)",
         "  ctrl + d     - Delete selected timer",
         "  tab   - Next timer",
         "  l     - Set label for timer",
