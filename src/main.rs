@@ -16,7 +16,11 @@ use ratatui::{
     Frame,
 };
 
-static UI_UPDATE_RATE_MS: u64 = 90;
+// 16 ms = 60 fps
+// 33 ms = 30 fps
+// 66 ms = 15 fps
+
+static UI_UPDATE_RATE_MS: u64 = 66;
 
 #[derive(Clone)]
 struct Time {
