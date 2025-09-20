@@ -1,7 +1,7 @@
 use std::env;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{interval_at, Duration, Instant};
+use tokio::time::{interval_at, Duration, Instant, Interval};
 use tokio::time;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -20,7 +20,8 @@ use ratatui::{
 // 33 ms = 30 fps
 // 66 ms = 15 fps
 
-static UI_UPDATE_RATE_MS: u64 = 66;
+// TODO add user-adjustable UI update rate
+static UI_UPDATE_RATE_MS: u64 = 33;
 
 #[derive(Clone)]
 struct Time {
@@ -62,6 +63,7 @@ struct State {
     selected_timer: usize,
     input_mode: bool,
     input_buffer: String,
+
     show_help: bool,
 }
 
@@ -79,6 +81,7 @@ impl State {
             selected_timer: 0,
             input_mode: false,
             input_buffer: String::new(),
+
             show_help: true,
         }
     }
@@ -313,13 +316,17 @@ fn draw_confirmation_prompt(frame: &mut Frame) {
         .centered()
         .style(Style::default().fg(Color::Gray).bg(Color::Black));
 
-    let prompt_area = Rect {
-        x: area.width / 4,
-        y: area.height / 4,
+    let rect_width = area.width / 6;
+    let rect_height = area.height / 6;
 
-        width: area.width / 2,
-        height: area.width / 14,
-    };
+    let x_pos = (area.width - rect_width) / 2;
+    let y_pos = (area.height - rect_height) / 2;
+
+    let prompt_area = Rect::new(
+        x_pos,
+        y_pos,
+        rect_width,
+        rect_height);
 
     frame.render_widget(prompt_paragraph, prompt_area);
 }
