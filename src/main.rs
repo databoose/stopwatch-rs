@@ -16,13 +16,6 @@ use ratatui::{
     Frame,
 };
 
-// 16 ms = 60 fps
-// 33 ms = 30 fps
-// 66 ms = 15 fps
-
-// TODO add user-adjustable UI update rate
-static UI_UPDATE_RATE_MS: u64 = 33;
-
 #[derive(Clone)]
 struct Time {
     second: u16,
@@ -61,6 +54,7 @@ impl Timer {
 struct State {
     timers: Vec<Timer>,
     selected_timer: usize,
+    ui_update_rate_ms: u64,
     input_mode: bool,
     input_buffer: String,
 
@@ -79,6 +73,7 @@ impl State {
         Self {
             timers: vec![Timer::new(initial_label)],
             selected_timer: 0,
+            ui_update_rate_ms: 50, // default update rate for ui thread is 50ms
             input_mode: false,
             input_buffer: String::new(),
 
@@ -263,7 +258,7 @@ fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &
         .padding(Padding::uniform(1));
 
     let time_display = if state.input_mode && is_selected {
-        format!("Label: {}_", state.input_buffer) // TDOD : add input mode text wrapping for long labels
+        format!("Label: {}_", state.input_buffer) // TODO : add input mode text wrapping for long labels
     } else {
         let time_str = format!(
             "{}d:{}h:{}m:{}s",
@@ -316,8 +311,8 @@ fn draw_confirmation_prompt(frame: &mut Frame) {
         .centered()
         .style(Style::default().fg(Color::Gray).bg(Color::Black));
 
-    let rect_width = area.width / 6;
-    let rect_height = area.height / 6;
+    let rect_width = area.width / 2;
+    let rect_height = area.height / 4;
 
     let x_pos = (area.width - rect_width) / 2;
     let y_pos = (area.height - rect_height) / 2;
@@ -331,8 +326,9 @@ fn draw_confirmation_prompt(frame: &mut Frame) {
     frame.render_widget(prompt_paragraph, prompt_area);
 }
 
-fn draw_help(frame: &mut Frame) {
+fn draw_help(frame: &mut Frame, update_rate: u64) {
     let area = frame.area();
+    let fps = 1000 / update_rate;
     let help_text = vec![
         "Shortcuts:",
         "  ctrl + q     - Quit",
@@ -341,12 +337,13 @@ fn draw_help(frame: &mut Frame) {
         "  tab   - Next timer",
         "  l     - Set label for timer",
         "  h     - Toggle help",
+        "  ↑/↓   - Increase/Decrease UI FPS",
         "  esc   - Cancel input",
     ];
 
     let help_area = Rect {
         x: area.width.saturating_sub(42), // position 42 chars from the right edge of screen
-        y: area.height.saturating_sub(11), // position 11 lines from the bottom of screen
+        y: area.height.saturating_sub(13), // position 13 chars from the bottom of screen
 
         width: (area.width / 4).max(38).min(area.width),
         height: (area.height / 3).max(10).min(area.height),
@@ -355,7 +352,8 @@ fn draw_help(frame: &mut Frame) {
     let help_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Help ");
+        .title_top(Line::from("Help").left_aligned())
+        .title_top(Line::from(format!("FPS: {}", fps)).right_aligned());
 
     let help_paragraph = Paragraph::new(help_text.join("\n"))
         .block(help_block)
@@ -382,7 +380,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timer.task_handle = Some(handle)
     }
 
-    let mut interval = time::interval_at(Instant::now(), Duration::from_millis(UI_UPDATE_RATE_MS));
+    let mut interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
     'main_loop: loop {
         interval.tick().await;
 
@@ -401,7 +399,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if state.show_help {
-                draw_help(frame);
+                draw_help(frame, state.ui_update_rate_ms);
             }
         })?;
 
@@ -464,6 +462,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('l') => {
                             state.input_mode = true;
                             state.input_buffer.clear();
+                        },
+                        KeyCode::Up => {
+                            if !(state.ui_update_rate_ms <= 10) { // cap at 100fps
+                                state.ui_update_rate_ms = state.ui_update_rate_ms.saturating_sub(5);
+                                interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
+                            }
+                        },
+                        KeyCode::Down => {
+                            if !(state.ui_update_rate_ms >= 100) { // no lower than 10fps because it starts being unresponsive to key events
+                                state.ui_update_rate_ms = state.ui_update_rate_ms.saturating_add(5);
+                                interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
+                            }
                         },
                         KeyCode::Tab => {
                             state.next_timer();
