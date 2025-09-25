@@ -73,7 +73,7 @@ impl State {
         Self {
             timers: vec![Timer::new(initial_label)],
             selected_timer: 0,
-            ui_update_rate_ms: 50, // default update rate for ui thread is 50ms
+            ui_update_rate_ms: 50, // default update rate for ui thread is 50ms (20 FPS)
             input_mode: false,
             input_buffer: String::new(),
 
@@ -82,7 +82,7 @@ impl State {
     }
 
     fn add_timer(&mut self) {
-        if self.timers.len() < 6 {
+        if self.timers.len() < 8 {
             self.timers.push(Timer::new(None));
             self.selected_timer = self.timers.len() - 1;
         }
@@ -153,6 +153,7 @@ async fn counter(time: Arc<Mutex<Time>>) {
     }
 }
 
+// bloated function, lot of redundant shit might find a way to clean up later idk, i think a max of 8 timers is solid
 fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
     let area = frame.area();
 
@@ -237,6 +238,42 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
 
             vec![top_thirds[0], top_thirds[1], top_thirds[2], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2]]
         },
+        7 => {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+
+            let top_fourths = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+                .split(rows[0]);
+
+            let bottom_thirds = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
+                .split(rows[1]);
+
+            vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2]]
+        },
+        8 => {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+
+            let top_fourths = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+                .split(rows[0]);
+
+            let bottom_thirds = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+                .split(rows[1]);
+
+            vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2], bottom_thirds[3]]
+        }
         _ => vec![area],
     }
 }
@@ -331,9 +368,9 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
     let fps = 1000 / update_rate;
     let help_text = vec![
         "Shortcuts:",
-        "  ctrl + q     - Quit",
-        "  ctrl + a     - Add timer (max 6)",
-        "  ctrl + d     - Delete selected timer",
+        "  ctrl + q   - Quit",
+        "  ctrl + a   - Add timer (max 6)",
+        "  ctrl + d   - Delete selected timer",
         "  tab   - Next timer",
         "  l     - Set label for timer",
         "  h     - Toggle help",
@@ -437,7 +474,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         },
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if state.timers.len() < 6 {
+                            if state.timers.len() < 8 {
                                 state.add_timer();
 
                                 let idx = state.timers.len() - 1;
@@ -456,7 +493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 state.remove_timer();
                             }
                         },
-                        KeyCode::Char('h') => {  // No modifier check for 'h'
+                        KeyCode::Char('h') => {
                             state.toggle_help();
                         },
                         KeyCode::Char('l') => {
