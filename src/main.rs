@@ -369,7 +369,7 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
     let help_text = vec![
         "Shortcuts:",
         "  ctrl + q   - Quit",
-        "  ctrl + a   - Add timer (max 6)",
+        "  ctrl + a   - Add timer (max 8)",
         "  ctrl + d   - Delete selected timer",
         "  tab   - Next timer",
         "  l     - Set label for timer",
