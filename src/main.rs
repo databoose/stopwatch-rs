@@ -81,6 +81,16 @@ impl State {
         }
     }
 
+    async fn reset_timer(&mut self) {
+        self.timers[self.selected_timer].label = Some(String::new());
+        let mut time_guard = self.timers[self.selected_timer].timer_state.lock().await;
+
+        time_guard.second = 0;
+        time_guard.minute = 0;
+        time_guard.hour = 0;
+        time_guard.days = 0;
+    }
+
     fn add_timer(&mut self) {
         if self.timers.len() < 8 {
             self.timers.push(Timer::new(None));
@@ -371,6 +381,7 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
         "  ctrl + q   - Quit",
         "  ctrl + a   - Add timer (max 8)",
         "  ctrl + d   - Delete selected timer",
+        "  ctrl + r   - Reset selected timer",
         "  tab   - Next timer",
         "  l     - Set label for timer",
         "  h     - Toggle help",
@@ -380,10 +391,10 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
 
     let help_area = Rect {
         x: area.width.saturating_sub(42), // position 42 chars from the right edge of screen
-        y: area.height.saturating_sub(13), // position 13 chars from the bottom of screen
+        y: area.height.saturating_sub(15), // position 15 chars from the bottom of screen
 
         width: (area.width / 4).max(38).min(area.width),
-        height: (area.height / 3).max(10).min(area.height),
+        height: (area.height / 3).max(13).min(area.height),
     };
 
     let help_block = Block::default()
@@ -492,6 +503,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if state.timers.len() > 1 {
                                 state.remove_timer();
                             }
+                        },
+                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            state.reset_timer().await;
                         },
                         KeyCode::Char('h') => {
                             state.toggle_help();
