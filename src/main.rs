@@ -82,7 +82,6 @@ impl State {
     }
 
     async fn reset_timer(&mut self) {
-        self.timers[self.selected_timer].label = Some(String::new());
         let mut time_guard = self.timers[self.selected_timer].timer_state.lock().await;
 
         time_guard.second = 0;
