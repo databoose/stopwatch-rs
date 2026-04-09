@@ -11,6 +11,10 @@ debug = false
 lto = true
 
 [dependencies]
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.51.1", features = ["full"] }
 crossterm = "0.29.0"
-ratatui = "0.29.0"
+ratatui = "0.30.0"
+
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+futures = "0.3.32"
