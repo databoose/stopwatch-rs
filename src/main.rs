@@ -1,8 +1,12 @@
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tokio::time::{interval_at, Duration, Instant, Interval};
+use tokio::time::{interval_at, Duration, Instant};
 use tokio::time;
+use serde::{Deserialize, Serialize};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::enable_raw_mode;
@@ -16,38 +20,154 @@ use ratatui::{
     Frame,
 };
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct PersistedTimer {
+    timer_id: usize,
+    elapsed_seconds: u64,
+    last_wall_clock: u64, // UNIX timestamp when last saved
+    label: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct PersistedState {
+    timers: Vec<PersistedTimer>,
+    selected_timer: usize,
+    save_timestamp: u64,
+}
+
 #[derive(Clone)]
 struct Time {
     second: u16,
     minute: u16,
     hour: u16,
     days: u16,
+    // Hybrid tracking fields
+    total_seconds: u64,
+    start_wall_clock: u64,        // UNIX timestamp when timer started/resumed
+    last_sync_wall_clock: u64,    // Last time we synced/validated
+    sleep_tick_count: u64,        // count of sleep-based ticks for comparison
 }
 
 impl Time {
     fn new() -> Self {
+        let now = Self::current_unix_time();
         Self {
             second: 0,
             minute: 0,
             hour: 0,
             days: 0,
+            total_seconds: 0,
+            start_wall_clock: now,
+            last_sync_wall_clock: now,
+            sleep_tick_count: 0,
+        }
+    }
+    
+    // calculate elapsed time since last save using wall-clock
+    fn from_persisted(persisted: &PersistedTimer, now: u64) -> Self {
+        let elapsed_since_save = now.saturating_sub(persisted.last_wall_clock);
+        let total_seconds = persisted.elapsed_seconds + elapsed_since_save;
+        
+        let mut time = Self {
+            second: 0,
+            minute: 0,
+            hour: 0,
+            days: 0,
+            total_seconds,
+            start_wall_clock: persisted.last_wall_clock,
+            last_sync_wall_clock: now,
+            sleep_tick_count: 0,
+        };
+        time.update_display_fields();
+        time
+    }
+
+    fn current_unix_time() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn update_display_fields(&mut self) {
+        let total = self.total_seconds;
+        self.second = (total % 60) as u16;
+        self.minute = ((total / 60) % 60) as u16;
+        self.hour = ((total / 3600) % 24) as u16;
+        self.days = (total / 86400) as u16;
+    }
+
+    fn increment(&mut self) {
+        self.total_seconds += 1;
+        self.sleep_tick_count += 1;
+        self.update_display_fields();
+    }
+
+    // check for desync between sleep-based ticks and wall-clock elapsed time
+    fn check_desync(&self, now: u64) -> Option<i64> {
+        let expected_ticks = now.saturating_sub(self.last_sync_wall_clock);
+        let actual_ticks = self.sleep_tick_count;
+        let diff = expected_ticks as i64 - actual_ticks as i64;
+        
+        // consider desync if difference > 2 seconds (tolerance for scheduling jitter)
+        if diff.abs() > 2 {
+            Some(diff)
+        } else {
+            None
+        }
+    }
+
+    fn correct_desync(&mut self, diff: i64, now: u64) {
+        eprintln!("stopwatch drift detected")
+        /*
+            if diff > 0 {
+                // We're behind: add missed seconds
+                self.total_seconds = self.total_seconds.saturating_add(diff as u64);
+            } else if diff < 0 {
+                // We're ahead: subtract extra seconds (rare, but possible after sleep)
+                self.total_seconds = self.total_seconds.saturating_sub((-diff) as u64);
+            }
+            self.update_display_fields();
+            self.sleep_tick_count = now.saturating_sub(self.last_sync_wall_clock);
+            self.last_sync_wall_clock = now;
+        */
+    }
+
+    fn sync_wall_clock(&mut self, now: u64) {
+        self.last_sync_wall_clock = now;
+    }
+
+    fn to_persisted(&self, timer_id: usize, label: &Option<String>) -> PersistedTimer {
+        PersistedTimer {
+            timer_id,
+            elapsed_seconds: self.total_seconds,
+            last_wall_clock: Self::current_unix_time(),
+            label: label.clone(),
         }
     }
 }
+
+// ============ TIMER STRUCT ============
 
 struct Timer {
     timer_state: Arc<Mutex<Time>>,
     label: Option<String>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
+    timer_id: usize,
 }
 
 impl Timer {
-    fn new(label: Option<String>) -> Self {
+    fn new(label: Option<String>, timer_id: usize) -> Self {
         Self {
             timer_state: Arc::new(Mutex::new(Time::new())),
             label,
             task_handle: None,
+            timer_id,
         }
+    }
+
+    fn to_persisted(&self, time_snapshot: &Time) -> PersistedTimer {
+        time_snapshot.to_persisted(self.timer_id, &self.label)
     }
 }
 
@@ -57,8 +177,10 @@ struct State {
     ui_update_rate_ms: u64,
     input_mode: bool,
     input_buffer: String,
-
     show_help: bool,
+    next_timer_id: usize, // For assigning unique IDs to new timers
+    save_interval_seconds: u64,
+    last_save_time: u64,
 }
 
 impl State {
@@ -71,39 +193,46 @@ impl State {
         };
 
         Self {
-            timers: vec![Timer::new(initial_label)],
+            timers: vec![Timer::new(initial_label, 0)],
             selected_timer: 0,
-            ui_update_rate_ms: 50, // default update rate for ui thread is 50ms (20 FPS)
+            ui_update_rate_ms: 50,
             input_mode: false,
             input_buffer: String::new(),
-
             show_help: true,
+            next_timer_id: 1,
+            save_interval_seconds: 30,
+            last_save_time: Time::current_unix_time(),
         }
     }
 
     async fn reset_timer(&mut self) {
         let mut time_guard = self.timers[self.selected_timer].timer_state.lock().await;
-
+        let now = Time::current_unix_time();
+        
         time_guard.second = 0;
         time_guard.minute = 0;
         time_guard.hour = 0;
         time_guard.days = 0;
+        time_guard.total_seconds = 0;
+        time_guard.sleep_tick_count = 0;
+        time_guard.start_wall_clock = now;
+        time_guard.last_sync_wall_clock = now;
     }
 
     fn add_timer(&mut self) {
         if self.timers.len() < 8 {
-            self.timers.push(Timer::new(None));
+            let timer_id = self.next_timer_id;
+            self.next_timer_id += 1;
+            self.timers.push(Timer::new(None, timer_id));
             self.selected_timer = self.timers.len() - 1;
         }
     }
 
     fn remove_timer(&mut self) {
         if self.timers.len() > 1 {
-            match &self.timers[self.selected_timer].task_handle {
-                Some(handle) => handle.abort(),
-                None => {}
+            if let Some(handle) = self.timers[self.selected_timer].task_handle.take() {
+                handle.abort();
             }
-
             self.timers.remove(self.selected_timer);
             if self.selected_timer >= self.timers.len() {
                 self.selected_timer = self.timers.len() - 1;
@@ -117,7 +246,7 @@ impl State {
 
     fn next_timer(&mut self) {
         if !self.timers.is_empty() {
-            self.selected_timer = (self.selected_timer + 1) % self.timers.len(); // wraps around, moves from timer 0 → 1 → 2 → 3 → back to 0
+            self.selected_timer = (self.selected_timer + 1) % self.timers.len();
         }
     }
 
@@ -130,39 +259,116 @@ impl State {
         self.input_buffer.clear();
         self.input_mode = false;
     }
+
+    // ============ PERSISTENCE ============
+
+    fn get_save_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let exe_path = env::current_exe()?;
+        let exe_dir = exe_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        Ok(exe_dir.join("timers.toml"))
+    }
+
+    async fn save_to_disk(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut persisted_timers = Vec::new();
+        
+        for timer in &self.timers {
+            let time_guard = timer.timer_state.lock().await;
+            persisted_timers.push(timer.to_persisted(&time_guard));
+        }
+
+        let state = PersistedState {
+            timers: persisted_timers,
+            selected_timer: self.selected_timer,
+            save_timestamp: Time::current_unix_time(),
+        };
+
+        let toml_string = toml::to_string_pretty(&state)?;
+        let save_path = Self::get_save_path()?;
+        fs::write(save_path, toml_string)?;
+        Ok(())
+    }
+
+    fn load_from_disk() -> Result<Option<PersistedState>, Box<dyn std::error::Error>> {
+        let save_path = Self::get_save_path()?;
+        
+        if !save_path.exists() {
+            return Ok(None);
+        }
+
+        let contents = fs::read_to_string(save_path)?;
+        let state: PersistedState = toml::from_str(&contents)?;
+        Ok(Some(state))
+    }
+
+    async fn resume_from_persisted(&mut self, persisted: PersistedState) {
+        let now = Time::current_unix_time();
+        
+        // Clear existing timers
+        for timer in &mut self.timers {
+            if let Some(handle) = timer.task_handle.take() {
+                handle.abort();
+            }
+        }
+        self.timers.clear();
+
+        // Restore timers from persisted state
+        for p_timer in persisted.timers {
+            let mut time = Time::from_persisted(&p_timer, now);
+            time.sync_wall_clock(now);
+            
+            let mut timer = Timer::new(p_timer.label, p_timer.timer_id);
+            *timer.timer_state.lock().await = time;
+            
+            // Spawn counter task for resumed timer
+            let time_counter = Arc::clone(&timer.timer_state);
+            let handle = tokio::spawn(async move {
+                hybrid_counter(time_counter).await;
+            });
+            
+            timer.task_handle = Some(handle);
+            self.timers.push(timer);
+            
+            if p_timer.timer_id >= self.next_timer_id {
+                self.next_timer_id = p_timer.timer_id + 1;
+            }
+        }
+
+        self.selected_timer = persisted.selected_timer.min(self.timers.len().saturating_sub(1));
+        self.last_save_time = now;
+    }
+
+    fn should_save(&self) -> bool {
+        let now = Time::current_unix_time();
+        now.saturating_sub(self.last_save_time) >= self.save_interval_seconds
+    }
+
+    fn mark_saved(&mut self) {
+        self.last_save_time = Time::current_unix_time();
+    }
 }
 
-async fn counter(time: Arc<Mutex<Time>>) {
-    let start = Instant::now() + Duration::from_secs(1);
-
-    // automatically accounts for any computational time taken in the loop, mitigating drift
-    // if computation takes 0.2s, the next wait is 0.8s to hit the 1s mark
-    let mut interval = time::interval_at(start, Duration::from_secs(1));
+async fn hybrid_counter(time: Arc<Mutex<Time>>) {
+    let mut interval = interval_at(Instant::now() + Duration::from_secs(1), Duration::from_secs(1));
 
     loop {
         interval.tick().await;
 
         let mut time_guard = time.lock().await;
-        time_guard.second += 1;
 
-        if time_guard.second > 59 {
-            time_guard.second = 0;
-            time_guard.minute += 1;
+        // increment sleep-based counter (original behavior)
+        time_guard.increment();
 
-            if time_guard.minute > 59 {
-                time_guard.minute = 0;
-                time_guard.hour += 1;
-
-                if time_guard.hour > 23 {
-                    time_guard.hour = 0;
-                    time_guard.days += 1;
-                }
+        // periodically check for desync (every 10 seconds)
+        let now = Time::current_unix_time();
+        if time_guard.total_seconds % 10 == 0 {
+            if let Some(diff) = time_guard.check_desync(now) {
+                time_guard.correct_desync(diff, now);
             }
         }
     }
 }
 
-// bloated function, lot of redundant shit might find a way to clean up later idk, i think a max of 8 timers is solid
+
 fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
     let area = frame.area();
 
@@ -180,53 +386,44 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             let top_halves = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(rows[0]);
-
             let bottom_halves = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(rows[1]);
-
-            vec![top_halves[0], top_halves[1], bottom_halves[1]]
+            vec![top_halves[0], top_halves[1], bottom_halves[0]]
         },
         4 => {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             let top_halves = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(rows[0]);
-
             let bottom_halves = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(rows[1]);
-
-            vec![top_halves[0], top_halves[1], bottom_halves[1], bottom_halves[0]]
+            vec![top_halves[0], top_halves[1], bottom_halves[0], bottom_halves[1]]
         },
         5 => {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             let top_thirds = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
                 .split(rows[0]);
-
             let bottom_halves = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(rows[1]);
-
             vec![top_thirds[0], top_thirds[1], top_thirds[2], bottom_halves[0], bottom_halves[1]]
         },
         6 => {
@@ -234,17 +431,14 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             let top_thirds = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
                 .split(rows[0]);
-
             let bottom_thirds = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
                 .split(rows[1]);
-
             vec![top_thirds[0], top_thirds[1], top_thirds[2], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2]]
         },
         7 => {
@@ -252,17 +446,14 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             let top_fourths = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
                 .split(rows[0]);
-
             let bottom_thirds = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
                 .split(rows[1]);
-
             vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2]]
         },
         8 => {
@@ -270,18 +461,16 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             let top_fourths = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
                 .split(rows[0]);
-
-            let bottom_thirds = Layout::default()
+            let bottom_fourths = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
                 .split(rows[1]);
-
-            vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2], bottom_thirds[3]]
+            vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], 
+                 bottom_fourths[0], bottom_fourths[1], bottom_fourths[2], bottom_fourths[3]]
         }
         _ => vec![area],
     }
@@ -289,12 +478,7 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
 
 fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time, index: usize, state: &State) {
     let is_selected = index == state.selected_timer;
-    let border_color = if is_selected {
-        Color::Green
-    }
-    else {
-        Color::Gray
-    };
+    let border_color = if is_selected { Color::Green } else { Color::Gray };
 
     let title = format!(" Timer {} ", index + 1);
     let time_block = Block::default()
@@ -304,7 +488,7 @@ fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &
         .padding(Padding::uniform(1));
 
     let time_display = if state.input_mode && is_selected {
-        format!("Label: {}_", state.input_buffer) // TODO : add input mode text wrapping for long labels
+        format!("Label: {}_", state.input_buffer)
     } else {
         let time_str = format!(
             "{}d:{}h:{}m:{}s",
@@ -313,7 +497,6 @@ fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &
             time_snapshot.minute,
             time_snapshot.second
         );
-
         match &timer.label {
             None => time_str,
             Some(label) => format!("{}\n{}", time_str, label),
@@ -330,21 +513,11 @@ fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &
 
 fn draw_confirmation_prompt(frame: &mut Frame) {
     let area = frame.area();
-
     let line = Line::from(vec![
-            Span::raw("Are you sure? "),
-            Span::styled(
-                "Y",
-                Color::Green,
-            ),
-            Span::styled(
-                "/",
-                Color::Gray,
-            ),
-            Span::styled(
-                "N",
-                Color::Red,
-            ),
+        Span::raw("Are you sure? "),
+        Span::styled("Y", Style::default().fg(Color::Green)),
+        Span::styled("/", Style::default().fg(Color::Gray)),
+        Span::styled("N", Style::default().fg(Color::Red)),
     ]);
 
     let prompt_block = Block::default()
@@ -359,15 +532,9 @@ fn draw_confirmation_prompt(frame: &mut Frame) {
 
     let rect_width = area.width / 2;
     let rect_height = area.height / 4;
-
     let x_pos = (area.width - rect_width) / 2;
     let y_pos = (area.height - rect_height) / 2;
-
-    let prompt_area = Rect::new(
-        x_pos,
-        y_pos,
-        rect_width,
-        rect_height);
+    let prompt_area = Rect::new(x_pos, y_pos, rect_width, rect_height);
 
     frame.render_widget(prompt_paragraph, prompt_area);
 }
@@ -381,19 +548,20 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
         "  ctrl + a   - Add timer (max 8)",
         "  ctrl + d   - Delete selected timer",
         "  ctrl + r   - Reset selected timer",
-        "  tab   - Next timer",
-        "  l     - Set label for timer",
-        "  h     - Toggle help",
-        "  ↑/↓   - Increase/Decrease UI FPS",
-        "  esc   - Cancel input",
+        "  tab        - Next timer",
+        "  l          - Set label for timer",
+        "  h          - Toggle help",
+        "  ↑/↓        - Increase/Decrease UI FPS",
+        "  esc        - Cancel input",
+        "",
+        "Auto-save: Every 30s to binary dir",
     ];
 
     let help_area = Rect {
-        x: area.width.saturating_sub(42), // position 42 chars from the right edge of screen
-        y: area.height.saturating_sub(15), // position 15 chars from the bottom of screen
-
+        x: area.width.saturating_sub(42),
+        y: area.height.saturating_sub(17),
         width: (area.width / 4).max(38).min(area.width),
-        height: (area.height / 3).max(13).min(area.height),
+        height: (area.height / 3).max(15).min(area.height),
     };
 
     let help_block = Block::default()
@@ -409,29 +577,34 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
     frame.render_widget(help_paragraph, help_area);
 }
 
-// since the only explicit tasks we spawn are simple counters, we can use lower threadcount than normal tbh
+// ============ MAIN ============
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut terminal = ratatui::init();
     let mut state = State::new();
 
-    // only iterates once because we only have one timer rn, might implement multiple args later
-    for timer in &mut state.timers {
-        let time_counter = Arc::clone(&timer.timer_state);
-
-        let handle = tokio::spawn(async move {
-            counter(time_counter).await;
-        });
-
-        timer.task_handle = Some(handle)
+    // try to load persisted state on startup
+    if let Ok(Some(persisted)) = State::load_from_disk() {
+        state.resume_from_persisted(persisted).await;
+    } else {
+        // Start fresh timers if no persisted state
+        for timer in &mut state.timers {
+            let time_counter = Arc::clone(&timer.timer_state);
+            let handle = tokio::spawn(async move {
+                hybrid_counter(time_counter).await;
+            });
+            timer.task_handle = Some(handle);
+        }
     }
 
     let mut interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
+    
     'main_loop: loop {
         interval.tick().await;
 
-        // take snapshots of all timer states so we can draw them for next frame
+        // Snapshot timer states for rendering
         let mut time_snapshots = Vec::new();
         for timer in &state.timers {
             let time_guard = timer.timer_state.lock().await;
@@ -440,33 +613,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         terminal.draw(|frame| {
             let areas = get_layout_areas(frame, state.timers.len());
-
             for i in 0..state.timers.len() {
                 draw_timer_box(frame, areas[i], &state.timers[i], &time_snapshots[i], i, &state);
             }
-
             if state.show_help {
                 draw_help(frame, state.ui_update_rate_ms);
             }
         })?;
 
+        // auto-save periodically
+        if state.should_save() {
+            if let Err(e) = state.save_to_disk().await {
+                eprintln!("Warning: Failed to save state: {}", e);
+            } else {
+                state.mark_saved();
+            }
+        }
+
+        // Handle input
         if crossterm::event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
                 if state.input_mode {
                     match key.code {
-                        KeyCode::Enter => {
-                            state.set_label();
-                        },
+                        KeyCode::Enter => state.set_label(),
                         KeyCode::Esc => {
                             state.input_mode = false;
                             state.input_buffer.clear();
                         },
-                        KeyCode::Backspace => {
-                            state.input_buffer.pop();
-                        },
-                        KeyCode::Char(c) => {
-                            state.input_buffer.push(c);
-                        },
+                        KeyCode::Backspace => { state.input_buffer.pop(); },
+                        KeyCode::Char(c) => { state.input_buffer.push(c); },
                         _ => {}
                     }
                 } else {
@@ -476,25 +651,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 terminal.draw(|frame| { draw_confirmation_prompt(frame); })?;
                                 if let Event::Key(key) = event::read()? {
                                         match key.code {
-                                            KeyCode::Char('y') => break 'main_loop,
-                                            KeyCode::Char('n') => break 'confirm_loop,
-                                            _ => continue
-                                        }
+                                            KeyCode::Char('y') => {
+                                            state.save_to_disk().await; // save state and quit
+                                            break 'main_loop;
+                                        },
+                                        KeyCode::Char('n') => break 'confirm_loop,
+                                        _ => continue
+                                    }
                                 }
                             }
                         },
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if state.timers.len() < 8 {
                                 state.add_timer();
-
                                 let idx = state.timers.len() - 1;
                                 let timer = &mut state.timers[idx];
-
                                 let counter_time = Arc::clone(&timer.timer_state);
                                 let handle = tokio::spawn(async move {
-                                    counter(counter_time).await;
+                                    hybrid_counter(counter_time).await;
                                 });
-
                                 timer.task_handle = Some(handle);
                             }
                         },
@@ -506,28 +681,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             state.reset_timer().await;
                         },
-                        KeyCode::Char('h') => {
-                            state.toggle_help();
-                        },
+                        KeyCode::Char('h') => state.toggle_help(),
                         KeyCode::Char('l') => {
                             state.input_mode = true;
                             state.input_buffer.clear();
                         },
                         KeyCode::Up => {
-                            if !(state.ui_update_rate_ms <= 10) { // cap at 100fps
+                            if state.ui_update_rate_ms > 10 {
                                 state.ui_update_rate_ms = state.ui_update_rate_ms.saturating_sub(5);
                                 interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
                             }
                         },
                         KeyCode::Down => {
-                            if !(state.ui_update_rate_ms >= 100) { // no lower than 10fps because it starts being unresponsive to key events
+                            if state.ui_update_rate_ms < 100 {
                                 state.ui_update_rate_ms = state.ui_update_rate_ms.saturating_add(5);
                                 interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
                             }
                         },
-                        KeyCode::Tab => {
-                            state.next_timer();
-                        },
+                        KeyCode::Tab => state.next_timer(),
                         _ => {}
                     }
                 }
@@ -535,6 +706,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // save on exit
+    let _ = state.save_to_disk();
+    
     ratatui::restore();
     Ok(())
 }
