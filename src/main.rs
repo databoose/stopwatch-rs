@@ -1,12 +1,12 @@
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tokio::time::{interval_at, Duration, Instant};
 use tokio::time;
-use serde::{Deserialize, Serialize};
+use tokio::time::{interval_at, Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::enable_raw_mode;
@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Alignment,
     style::{Color, Style},
-    text::{Span, Line},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
@@ -43,9 +43,9 @@ struct Time {
     days: u16,
     // Hybrid tracking fields
     total_seconds: u64,
-    start_wall_clock: u64,        // UNIX timestamp when timer started/resumed
-    last_sync_wall_clock: u64,    // Last time we synced/validated
-    sleep_tick_count: u64,        // count of sleep-based ticks for comparison
+    start_wall_clock: u64,     // UNIX timestamp when timer started/resumed
+    last_sync_wall_clock: u64, // Last time we synced/validated
+    sleep_tick_count: u64,     // count of sleep-based ticks for comparison
 }
 
 impl Time {
@@ -62,12 +62,12 @@ impl Time {
             sleep_tick_count: 0,
         }
     }
-    
+
     // calculate elapsed time since last save using wall-clock
     fn from_persisted(persisted: &PersistedTimer, now: u64) -> Self {
         let elapsed_since_save = now.saturating_sub(persisted.last_wall_clock);
         let total_seconds = persisted.elapsed_seconds + elapsed_since_save;
-        
+
         let mut time = Self {
             second: 0,
             minute: 0,
@@ -108,7 +108,7 @@ impl Time {
         let expected_ticks = now.saturating_sub(self.last_sync_wall_clock);
         let actual_ticks = self.sleep_tick_count;
         let diff = expected_ticks as i64 - actual_ticks as i64;
-        
+
         // consider desync if difference > 2 seconds (tolerance for scheduling jitter)
         if diff.abs() > 2 {
             Some(diff)
@@ -208,7 +208,7 @@ impl State {
     async fn reset_timer(&mut self) {
         let mut time_guard = self.timers[self.selected_timer].timer_state.lock().await;
         let now = Time::current_unix_time();
-        
+
         time_guard.second = 0;
         time_guard.minute = 0;
         time_guard.hour = 0;
@@ -220,7 +220,7 @@ impl State {
     }
 
     fn add_timer(&mut self) {
-        if self.timers.len() < 8 {
+        if self.timers.len() < 12 {
             let timer_id = self.next_timer_id;
             self.next_timer_id += 1;
             self.timers.push(Timer::new(None, timer_id));
@@ -264,13 +264,15 @@ impl State {
 
     fn get_save_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
         let exe_path = env::current_exe()?;
-        let exe_dir = exe_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let exe_dir = exe_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         Ok(exe_dir.join("timers.toml"))
     }
 
     async fn save_to_disk(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut persisted_timers = Vec::new();
-        
+
         for timer in &self.timers {
             let time_guard = timer.timer_state.lock().await;
             persisted_timers.push(timer.to_persisted(&time_guard));
@@ -290,7 +292,7 @@ impl State {
 
     fn load_from_disk() -> Result<Option<PersistedState>, Box<dyn std::error::Error>> {
         let save_path = Self::get_save_path()?;
-        
+
         if !save_path.exists() {
             return Ok(None);
         }
@@ -302,7 +304,7 @@ impl State {
 
     async fn resume_from_persisted(&mut self, persisted: PersistedState) {
         let now = Time::current_unix_time();
-        
+
         // Clear existing timers
         for timer in &mut self.timers {
             if let Some(handle) = timer.task_handle.take() {
@@ -315,25 +317,27 @@ impl State {
         for p_timer in persisted.timers {
             let mut time = Time::from_persisted(&p_timer, now);
             time.sync_wall_clock(now);
-            
+
             let mut timer = Timer::new(p_timer.label, p_timer.timer_id);
             *timer.timer_state.lock().await = time;
-            
+
             // Spawn counter task for resumed timer
             let time_counter = Arc::clone(&timer.timer_state);
             let handle = tokio::spawn(async move {
                 hybrid_counter(time_counter).await;
             });
-            
+
             timer.task_handle = Some(handle);
             self.timers.push(timer);
-            
+
             if p_timer.timer_id >= self.next_timer_id {
                 self.next_timer_id = p_timer.timer_id + 1;
             }
         }
 
-        self.selected_timer = persisted.selected_timer.min(self.timers.len().saturating_sub(1));
+        self.selected_timer = persisted
+            .selected_timer
+            .min(self.timers.len().saturating_sub(1));
         self.last_save_time = now;
     }
 
@@ -348,7 +352,10 @@ impl State {
 }
 
 async fn hybrid_counter(time: Arc<Mutex<Time>>) {
-    let mut interval = interval_at(Instant::now() + Duration::from_secs(1), Duration::from_secs(1));
+    let mut interval = interval_at(
+        Instant::now() + Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
 
     loop {
         interval.tick().await;
@@ -368,117 +375,59 @@ async fn hybrid_counter(time: Arc<Mutex<Time>>) {
     }
 }
 
-
 fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
     let area = frame.area();
-
-    match timer_count {
-        1 => vec![area],
-        2 => {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            vec![chunks[0], chunks[1]]
-        },
-        3 => {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            let top_halves = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[0]);
-            let bottom_halves = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            vec![top_halves[0], top_halves[1], bottom_halves[0]]
-        },
-        4 => {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            let top_halves = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[0]);
-            let bottom_halves = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            vec![top_halves[0], top_halves[1], bottom_halves[0], bottom_halves[1]]
-        },
-        5 => {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            let top_thirds = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
-                .split(rows[0]);
-            let bottom_halves = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-            vec![top_thirds[0], top_thirds[1], top_thirds[2], bottom_halves[0], bottom_halves[1]]
-        },
-        6 => {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            let top_thirds = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
-                .split(rows[0]);
-            let bottom_thirds = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
-                .split(rows[1]);
-            vec![top_thirds[0], top_thirds[1], top_thirds[2], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2]]
-        },
-        7 => {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            let top_fourths = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
-                .split(rows[0]);
-            let bottom_thirds = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
-                .split(rows[1]);
-            vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], bottom_thirds[0], bottom_thirds[1], bottom_thirds[2]]
-        },
-        8 => {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            let top_fourths = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
-                .split(rows[0]);
-            let bottom_fourths = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
-                .split(rows[1]);
-            vec![top_fourths[0], top_fourths[1], top_fourths[2], top_fourths[3], 
-                 bottom_fourths[0], bottom_fourths[1], bottom_fourths[2], bottom_fourths[3]]
-        }
-        _ => vec![area],
+    if timer_count <= 1 {
+        return vec![area];
     }
+
+    // for 2 we just do a horizontal split, vertical with 2x timers looks wrong imo
+    if timer_count == 2 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        return vec![chunks[0], chunks[1]];
+    }
+
+    let cols = (timer_count as f64).sqrt().ceil() as usize;
+    let rows = timer_count.div_ceil(cols);
+
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
+        .split(area);
+
+    row_areas
+        .iter()
+        .enumerate()
+        // flatten so we get one vector of multiple Rects rather than multiple individual vecs containing rect
+        .flat_map(|(i, &row)| {
+            let start = i * cols;
+            let row_cols = (timer_count - start).min(cols);
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Ratio(1, row_cols as u32); row_cols])
+                .split(row)
+                .to_vec()
+        })
+        .collect()
 }
 
-fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &Time, index: usize, state: &State) {
+fn draw_timer_box(
+    frame: &mut Frame,
+    area: Rect,
+    timer: &Timer,
+    time_snapshot: &Time,
+    index: usize,
+    state: &State,
+) {
     let is_selected = index == state.selected_timer;
-    let border_color = if is_selected { Color::Green } else { Color::Gray };
+    let border_color = if is_selected {
+        Color::Green
+    } else {
+        Color::Gray
+    };
 
     let title = format!(" Timer {} ", index + 1);
     let time_block = Block::default()
@@ -492,10 +441,7 @@ fn draw_timer_box(frame: &mut Frame, area: Rect, timer: &Timer, time_snapshot: &
     } else {
         let time_str = format!(
             "{}d:{}h:{}m:{}s",
-            time_snapshot.days,
-            time_snapshot.hour,
-            time_snapshot.minute,
-            time_snapshot.second
+            time_snapshot.days, time_snapshot.hour, time_snapshot.minute, time_snapshot.second
         );
         match &timer.label {
             None => time_str,
@@ -553,8 +499,6 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
         "  h          - Toggle help",
         "  ↑/↓        - Increase/Decrease UI FPS",
         "  esc        - Cancel input",
-        "",
-        "Auto-save: Every 30s to binary dir",
     ];
 
     let help_area = Rect {
@@ -589,7 +533,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(Some(persisted)) = State::load_from_disk() {
         state.resume_from_persisted(persisted).await;
     } else {
-        // Start fresh timers if no persisted state
+        // start fresh timers if no persisted state
         for timer in &mut state.timers {
             let time_counter = Arc::clone(&timer.timer_state);
             let handle = tokio::spawn(async move {
@@ -599,8 +543,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
-    
+    let mut interval = time::interval_at(
+        Instant::now(),
+        Duration::from_millis(state.ui_update_rate_ms),
+    );
+
     'main_loop: loop {
         interval.tick().await;
 
@@ -614,7 +561,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|frame| {
             let areas = get_layout_areas(frame, state.timers.len());
             for i in 0..state.timers.len() {
-                draw_timer_box(frame, areas[i], &state.timers[i], &time_snapshots[i], i, &state);
+                draw_timer_box(
+                    frame,
+                    areas[i],
+                    &state.timers[i],
+                    &time_snapshots[i],
+                    i,
+                    &state,
+                );
             }
             if state.show_help {
                 draw_help(frame, state.ui_update_rate_ms);
@@ -630,7 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Handle input
+        // handle input
         if crossterm::event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
                 if state.input_mode {
@@ -639,30 +593,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Esc => {
                             state.input_mode = false;
                             state.input_buffer.clear();
-                        },
-                        KeyCode::Backspace => { state.input_buffer.pop(); },
-                        KeyCode::Char(c) => { state.input_buffer.push(c); },
+                        }
+                        KeyCode::Backspace => {
+                            state.input_buffer.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            state.input_buffer.push(c);
+                        }
                         _ => {}
                     }
                 } else {
                     match key.code {
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             'confirm_loop: loop {
-                                terminal.draw(|frame| { draw_confirmation_prompt(frame); })?;
+                                terminal.draw(|frame| {
+                                    draw_confirmation_prompt(frame);
+                                })?;
                                 if let Event::Key(key) = event::read()? {
-                                        match key.code {
-                                            KeyCode::Char('y') => {
+                                    match key.code {
+                                        KeyCode::Char('y') => {
                                             state.save_to_disk().await; // save state and quit
                                             break 'main_loop;
-                                        },
+                                        }
                                         KeyCode::Char('n') => break 'confirm_loop,
-                                        _ => continue
+                                        _ => continue,
                                     }
                                 }
                             }
-                        },
+                        }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if state.timers.len() < 8 {
+                            if state.timers.len() < 12 {
                                 state.add_timer();
                                 let idx = state.timers.len() - 1;
                                 let timer = &mut state.timers[idx];
@@ -672,32 +632,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                                 timer.task_handle = Some(handle);
                             }
-                        },
+                        }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if state.timers.len() > 1 {
                                 state.remove_timer();
                             }
-                        },
+                        }
                         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             state.reset_timer().await;
-                        },
+                        }
                         KeyCode::Char('h') => state.toggle_help(),
                         KeyCode::Char('l') => {
                             state.input_mode = true;
                             state.input_buffer.clear();
-                        },
+                        }
                         KeyCode::Up => {
                             if state.ui_update_rate_ms > 10 {
                                 state.ui_update_rate_ms = state.ui_update_rate_ms.saturating_sub(5);
-                                interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
+                                interval = time::interval_at(
+                                    Instant::now(),
+                                    Duration::from_millis(state.ui_update_rate_ms),
+                                );
                             }
-                        },
+                        }
                         KeyCode::Down => {
                             if state.ui_update_rate_ms < 100 {
                                 state.ui_update_rate_ms = state.ui_update_rate_ms.saturating_add(5);
-                                interval = time::interval_at(Instant::now(), Duration::from_millis(state.ui_update_rate_ms));
+                                interval = time::interval_at(
+                                    Instant::now(),
+                                    Duration::from_millis(state.ui_update_rate_ms),
+                                );
                             }
-                        },
+                        }
                         KeyCode::Tab => state.next_timer(),
                         _ => {}
                     }
@@ -708,7 +674,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // save on exit
     let _ = state.save_to_disk();
-    
+
     ratatui::restore();
     Ok(())
 }
