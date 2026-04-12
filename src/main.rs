@@ -156,7 +156,7 @@ impl State {
             input_buffer: String::new(),
             show_help: true,
             next_timer_id: 1,
-            save_interval_seconds: 30,
+            save_interval_seconds: 3000, // autosave every 50 minutes
             last_save_time: Time::current_unix_time(),
         }
     }
