@@ -325,7 +325,9 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
         return vec![chunks[0], chunks[1]];
     }
     
+    // 6 timers √6≈2.44, rounded up to 3 cols for example
     let cols = (timer_count as f64).sqrt().ceil() as usize;
+    
     let rows = timer_count.div_ceil(cols);
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
