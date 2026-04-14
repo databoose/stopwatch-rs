@@ -5,10 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.dev]
+incremental = true
+
 [profile.release]
 opt-level = 2
 debug = false
 lto = true
+incremental = true
 
 [dependencies]
 tokio = { version = "1.51.1", features = ["full"] }
