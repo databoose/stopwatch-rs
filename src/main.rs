@@ -1,12 +1,11 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::enable_raw_mode;
-use ratatui::widgets::Padding;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Alignment,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Padding, Paragraph},
     Frame,
 };
 use serde::{Deserialize, Serialize};
@@ -18,6 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time;
 use tokio::time::{interval_at, Duration, Instant};
+
+mod debug;
+use debug::DebugLog;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct PersistedTimer {
@@ -57,7 +59,7 @@ impl Time {
             start_wall_clock: now,
         }
     }
-    
+
     // calculate elapsed time since last save using wall-clock
     fn from_persisted(persisted: &PersistedTimer, now: u64) -> Self {
         let elapsed_since_save = now.saturating_sub(persisted.last_wall_clock);
@@ -76,14 +78,14 @@ impl Time {
         time.update_display_fields();
         time
     }
-    
+
     fn current_unix_time() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
     }
-    
+
     fn update_display_fields(&mut self) {
         let total = self.total_seconds;
         self.second = (total % 60) as u16;
@@ -91,12 +93,12 @@ impl Time {
         self.hour = ((total / 3600) % 24) as u16;
         self.days = (total / 86400) as u16;
     }
-    
+
     fn increment(&mut self) {
         self.total_seconds += 1;
         self.update_display_fields();
     }
-    
+
     fn to_persisted(&self, timer_id: usize, label: &Option<String>) -> PersistedTimer {
         PersistedTimer {
             timer_id,
@@ -135,7 +137,8 @@ struct State {
     input_mode: bool,
     input_buffer: String,
     show_help: bool,
-    next_timer_id: usize, // For assigning unique IDs to new timers
+    show_dbg: bool,
+    next_timer_id: usize,
     save_interval_seconds: u64,
     last_save_time: u64,
 }
@@ -155,12 +158,13 @@ impl State {
             input_mode: false,
             input_buffer: String::new(),
             show_help: true,
+            show_dbg: false,
             next_timer_id: 1,
             save_interval_seconds: 1000, // autosave every 16 minutes
             last_save_time: Time::current_unix_time(),
         }
     }
-    
+
     async fn reset_timer(&mut self) {
         let mut time_guard = self.timers[self.selected_timer].timer_state.lock().await;
         let now = Time::current_unix_time();
@@ -171,7 +175,7 @@ impl State {
         time_guard.total_seconds = 0;
         time_guard.start_wall_clock = now;
     }
-    
+
     fn add_timer(&mut self) {
         if self.timers.len() < 12 {
             let timer_id = self.next_timer_id;
@@ -180,7 +184,7 @@ impl State {
             self.selected_timer = self.timers.len() - 1;
         }
     }
-    
+
     fn remove_timer(&mut self) {
         if self.timers.len() > 1 {
             if let Some(handle) = self.timers[self.selected_timer].task_handle.take() {
@@ -192,17 +196,21 @@ impl State {
             }
         }
     }
-    
+
+    fn toggle_debug(&mut self) {
+        self.show_dbg = !self.show_dbg;
+    }
+
     fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
     }
-    
+
     fn next_timer(&mut self) {
         if !self.timers.is_empty() {
             self.selected_timer = (self.selected_timer + 1) % self.timers.len();
         }
     }
-    
+
     fn set_label(&mut self) {
         if self.input_buffer.is_empty() {
             self.timers[self.selected_timer].label = None;
@@ -220,7 +228,7 @@ impl State {
             .unwrap_or_else(|| std::path::Path::new("."));
         Ok(exe_dir.join("timers.toml"))
     }
-    
+
     async fn save_to_disk(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut persisted_timers = Vec::new();
         for timer in &self.timers {
@@ -237,7 +245,7 @@ impl State {
         fs::write(save_path, toml_string)?;
         Ok(())
     }
-    
+
     fn load_from_disk() -> Result<Option<PersistedState>, Box<dyn std::error::Error>> {
         let save_path = Self::get_save_path()?;
         if !save_path.exists() {
@@ -247,7 +255,7 @@ impl State {
         let state: PersistedState = toml::from_str(&contents)?;
         Ok(Some(state))
     }
-    
+
     async fn resume_from_persisted(&mut self, persisted: PersistedState) {
         let now = Time::current_unix_time();
         // Clear existing timers
@@ -262,6 +270,7 @@ impl State {
             let time = Time::from_persisted(&p_timer, now);
             let mut timer = Timer::new(p_timer.label, p_timer.timer_id);
             *timer.timer_state.lock().await = time;
+
             // Spawn counter task for resumed timer
             let time_counter = Arc::clone(&timer.timer_state);
             let handle = tokio::spawn(async move {
@@ -278,12 +287,12 @@ impl State {
             .min(self.timers.len().saturating_sub(1));
         self.last_save_time = now;
     }
-    
+
     fn should_save(&self) -> bool {
         let now = Time::current_unix_time();
         now.saturating_sub(self.last_save_time) >= self.save_interval_seconds
     }
-    
+
     fn mark_saved(&mut self) {
         self.last_save_time = Time::current_unix_time();
     }
@@ -297,15 +306,19 @@ async fn hybrid_counter(time: Arc<Mutex<Time>>) {
     loop {
         interval.tick().await;
         let mut time_guard = time.lock().await;
-        // increment sleep-based counter (original behavior)
         time_guard.increment();
         if time_guard.total_seconds % 300 == 0 {
             let now = Time::current_unix_time();
             let expected = now.saturating_sub(time_guard.start_wall_clock);
             if expected.abs_diff(time_guard.total_seconds) > 2 {
-                eprintln!("drift detected"); // just alert user for now
-                // time_guard.total_seconds = expected;
-                // time_guard.update_display_fields();
+                DebugLog::log(&format!(
+                    "drift detected, diff : {:?}",
+                    expected.abs_diff(time_guard.total_seconds)
+                ));
+               
+                   // just alert user for now
+                   // time_guard.total_seconds = expected;
+                   // time_guard.update_display_fields();
             }
         }
     }
@@ -324,16 +337,16 @@ fn get_layout_areas(frame: &Frame, timer_count: usize) -> Vec<Rect> {
             .split(area);
         return vec![chunks[0], chunks[1]];
     }
-    
+
     // 6 timers √6≈2.44, rounded up to 3 cols for example
     let cols = (timer_count as f64).sqrt().ceil() as usize;
-    
+
     let rows = timer_count.div_ceil(cols);
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
         .split(area);
-    
+
     row_areas
         .iter()
         .enumerate()
@@ -405,14 +418,42 @@ fn draw_confirmation_prompt(frame: &mut Frame) {
         .block(prompt_block)
         .centered()
         .style(Style::default().fg(Color::Gray).bg(Color::Black));
-    
+
     let rect_width = area.width / 2;
     let rect_height = area.height / 4;
     let x_pos = (area.width - rect_width) / 2;
     let y_pos = (area.height - rect_height) / 2;
     let prompt_area = Rect::new(x_pos, y_pos, rect_width, rect_height);
-    
+
     frame.render_widget(prompt_paragraph, prompt_area);
+}
+
+fn draw_debug_box(frame: &mut Frame) {
+    let area = frame.area();
+    let debug_text = debug::DebugLog::get_all();
+        
+    let box_width = (area.width / 4).max(38).min(area.width); // quarter of screen space but no less than 38
+    let box_height = (area.height / 3).max(15).min(area.height);
+    
+    let dbg_area = Rect {
+        x: 3, // pin to left side (0) with tadbit of offset
+        y: area.height
+            .saturating_sub(box_height) // pin to bottom
+            .saturating_sub(2), // with a lil offset
+        width: box_width,
+        height: box_height,
+    };
+    
+    let dbg_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title_top(Line::from("Debug Log").left_aligned());
+    
+    let dbg_paragraph = Paragraph::new(debug_text.join("\n"))
+        .block(dbg_block)
+        .style(Style::default().fg(Color::DarkGray));
+    
+    frame.render_widget(dbg_paragraph, dbg_area);
 }
 
 fn draw_help(frame: &mut Frame, update_rate: u64) {
@@ -421,7 +462,7 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
     let help_text = vec![
         "Shortcuts:",
         " ctrl + q - Quit",
-        " ctrl + a - Add timer (max 8)",
+        " ctrl + a - Add timer (max 16)",
         " ctrl + d - Delete selected timer",
         " ctrl + r - Reset selected timer",
         " tab - Next timer",
@@ -429,28 +470,29 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
         " h - Toggle help",
         " ↑/↓ - Increase/Decrease UI FPS",
         " esc - Cancel input",
+        " ",
+        " ctrl + p - Show debug log",
     ];
-    
+
     let help_area = Rect {
         x: area.width.saturating_sub(42),
         y: area.height.saturating_sub(17),
-        width: (area.width / 4).max(38).min(area.width),
+        width: (area.width / 4).max(38).min(area.width), // quarter of screen space but no less than 38
         height: (area.height / 3).max(15).min(area.height),
     };
-    
+
     let help_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title_top(Line::from("Help").left_aligned())
         .title_top(Line::from(format!("FPS: {}", fps)).right_aligned());
-    
+
     let help_paragraph = Paragraph::new(help_text.join("\n"))
         .block(help_block)
         .style(Style::default().fg(Color::DarkGray));
-    
+
     frame.render_widget(help_paragraph, help_area);
 }
-
 
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -470,12 +512,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             timer.task_handle = Some(handle);
         }
     }
-    
+
     let mut interval = time::interval_at(
         Instant::now(),
         Duration::from_millis(state.ui_update_rate_ms),
     );
-    
+
     'main_loop: loop {
         interval.tick().await;
         // Snapshot timer states for rendering
@@ -498,6 +540,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if state.show_help {
                 draw_help(frame, state.ui_update_rate_ms);
+            }
+            if state.show_dbg {
+                draw_debug_box(frame);
             }
         })?;
         // auto-save periodically
@@ -564,6 +609,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             state.reset_timer().await;
+                        }
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            state.toggle_debug();
                         }
                         KeyCode::Char('h') => state.toggle_help(),
                         KeyCode::Char('l') => {
