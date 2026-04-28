@@ -1,5 +1,6 @@
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use crossterm::terminal::enable_raw_mode;
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Alignment,
@@ -20,6 +21,7 @@ use tokio::time::{interval_at, Duration, Instant};
 
 mod debug;
 use debug::DebugLog;
+mod mouse;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct PersistedTimer {
@@ -315,10 +317,11 @@ async fn hybrid_counter(time: Arc<Mutex<Time>>) {
                     "drift detected, diff : {:?}",
                     expected.abs_diff(time_guard.total_seconds)
                 ));
-               
-                   // just alert user for now
-                   // time_guard.total_seconds = expected;
-                   // time_guard.update_display_fields();
+
+                // just alert user for now
+                
+                // time_guard.total_seconds = expected;
+                // time_guard.update_display_fields();
             }
         }
     }
@@ -490,13 +493,13 @@ fn draw_help(frame: &mut Frame, update_rate: u64) {
     let help_paragraph = Paragraph::new(help_text.join("\n"))
         .block(help_block)
         .style(Style::default().fg(Color::DarkGray));
-
     frame.render_widget(help_paragraph, help_area);
 }
 
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+    mouse::enable_mouse()?;
     let mut terminal = ratatui::init();
     let mut state = State::new();
     // try to load persisted state on startup
@@ -518,6 +521,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(state.ui_update_rate_ms),
     );
 
+    let mut last_areas: Vec<ratatui::layout::Rect> = Vec::new();
+
     'main_loop: loop {
         interval.tick().await;
         // Snapshot timer states for rendering
@@ -528,6 +533,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         terminal.draw(|frame| {
             let areas = get_layout_areas(frame, state.timers.len());
+            last_areas = areas.clone(); // make copies of areas for mouse click selection
             for i in 0..state.timers.len() {
                 draw_timer_box(
                     frame,
@@ -553,9 +559,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.mark_saved();
             }
         }
+        
         // handle input
-        if crossterm::event::poll(Duration::ZERO)? {
-            if let Event::Key(key) = event::read()? {
+        
+        let mut events_this_tick = 0;
+        // poll events up to x times each tick so we dont get event congestion at low tickrate
+        while events_this_tick < 6 && crossterm::event::poll(Duration::ZERO)? {
+            events_this_tick += 1;
+            match event::read()? {
+            Event::Mouse(mouse_event) => {
+                if let MouseEventKind::Down(_) = mouse_event.kind {
+                    if let Some(idx) = mouse::hit_test(mouse_event.column, mouse_event.row, &last_areas) {
+                        state.selected_timer = idx;
+                    }
+                }
+            }
+            Event::Key(key) => {
                 if state.input_mode {
                     match key.code {
                         KeyCode::Enter => state.set_label(),
@@ -641,10 +660,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            _ => {}
+            }
         }
     }
     // save on exit
     let _ = state.save_to_disk();
+    let _ = mouse::disable_mouse();
     ratatui::restore();
     Ok(())
 }
