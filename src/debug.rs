@@ -18,7 +18,6 @@ impl DebugLog {
         if let Ok(mut lock) = LOGGER.lock() {
             if lock.debug_msg_list.len() >= lock.capacity {
                 lock.debug_msg_list.pop_front();
-                lock.debug_msg_list.push_back(msg.to_string());
             }
             lock.debug_msg_list.push_back(msg.to_string());
         }
