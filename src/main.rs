@@ -1,12 +1,14 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use crossterm::terminal::enable_raw_mode;
-
+use ratatui::widgets::ListDirection;
+use std::fs::OpenOptions;
+use std::io::Write;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Alignment,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Padding, Paragraph},
+    widgets::{Block, Borders, List, ListState, Padding, Paragraph},
     Frame,
 };
 use serde::{Deserialize, Serialize};
@@ -305,8 +307,22 @@ async fn hybrid_counter(time: Arc<Mutex<Time>>) {
         Instant::now() + Duration::from_secs(1),
         Duration::from_secs(1),
     );
+    
+    let mut test = 1;
     loop {
         interval.tick().await;
+        test = test + 1;
+        
+        let file_result = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("debug.log");
+        
+        if let Ok(mut file) = file_result {
+            let _ = writeln!(file, "{:?}", DebugLog::get_all());
+        }
+        DebugLog::log(&format!("{}", test));
+        
         let mut time_guard = time.lock().await;
         time_guard.increment();
         if time_guard.total_seconds % 300 == 0 {
@@ -433,7 +449,11 @@ fn draw_confirmation_prompt(frame: &mut Frame) {
 
 fn draw_debug_box(frame: &mut Frame) {
     let area = frame.area();
+    
+    let mut list_state = ListState::default();
     let debug_text = debug::DebugLog::get_all();
+    
+    list_state.select(Some(debug_text.len().saturating_sub(1)));
         
     let box_width = (area.width / 4).max(38).min(area.width); // quarter of screen space but no less than 38
     let box_height = (area.height / 3).max(15).min(area.height);
@@ -452,11 +472,17 @@ fn draw_debug_box(frame: &mut Frame) {
         .border_style(Style::default().fg(Color::DarkGray))
         .title_top(Line::from("Debug Log").left_aligned());
     
+    let dbg_list = List::new(debug_text)
+        .block(dbg_block)
+        .style(Style::default().fg(Color::DarkGray))
+        .direction(ListDirection::TopToBottom);
+    
+    /*
     let dbg_paragraph = Paragraph::new(debug_text.join("\n"))
         .block(dbg_block)
         .style(Style::default().fg(Color::DarkGray));
-    
-    frame.render_widget(dbg_paragraph, dbg_area);
+     */
+    frame.render_stateful_widget(dbg_list, dbg_area, &mut list_state);
 }
 
 fn draw_help(frame: &mut Frame, update_rate: u64) {
