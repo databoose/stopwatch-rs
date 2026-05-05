@@ -164,7 +164,7 @@ impl State {
             show_help: true,
             show_dbg: false,
             next_timer_id: 1,
-            save_interval_seconds: 1000, // autosave every 16 minutes
+            save_interval_seconds: 180, // autosave every 3 minutes
             last_save_time: Time::current_unix_time(),
         }
     }
@@ -308,20 +308,8 @@ async fn hybrid_counter(time: Arc<Mutex<Time>>) {
         Duration::from_secs(1),
     );
     
-    let mut test = 1;
     loop {
         interval.tick().await;
-        test = test + 1;
-        
-        let file_result = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("debug.log");
-        
-        if let Ok(mut file) = file_result {
-            let _ = writeln!(file, "{:?}", DebugLog::get_all());
-        }
-        DebugLog::log(&format!("{}", test));
         
         let mut time_guard = time.lock().await;
         time_guard.increment();
