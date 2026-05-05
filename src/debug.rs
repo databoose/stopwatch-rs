@@ -1,16 +1,18 @@
-use std::{collections::VecDeque, fmt::Debug};
+use std::{collections::VecDeque};
 use std::sync::{Mutex, LazyLock};
 
 pub struct DebugLog {
     debug_msg_list: VecDeque<String>,
-    capacity: usize
+    capacity: usize,
+    count: u8 // number to show in which place that debug log entry occured
 }
 
 impl DebugLog {
     fn new(capacity: usize) -> Self {
         Self {
             debug_msg_list: VecDeque::new(),
-            capacity
+            capacity,
+            count: 0
         }
     }
     
@@ -19,7 +21,10 @@ impl DebugLog {
             if lock.debug_msg_list.len() >= lock.capacity {
                 lock.debug_msg_list.pop_front();
             }
-            lock.debug_msg_list.push_back(msg.to_string());
+            lock.count = lock.count.saturating_add(1);
+            
+            let display_number = lock.count;
+            lock.debug_msg_list.push_back(format!("[{}] {}", display_number, msg));
         }
     }
     
@@ -33,5 +38,5 @@ impl DebugLog {
 }
 
 pub static LOGGER: LazyLock<Mutex<DebugLog>> = LazyLock::new(|| {
-    Mutex::new(DebugLog::new(20))
+    Mutex::new(DebugLog::new(40))
 });
