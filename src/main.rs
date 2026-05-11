@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tokio::time;
+use tokio::{signal, time};
 use tokio::time::{interval_at, Duration, Instant};
 
 mod debug;
@@ -181,7 +181,7 @@ impl State {
     }
 
     fn add_timer(&mut self) {
-        if self.timers.len() < 12 {
+        if self.timers.len() < 24 {
             let timer_id = self.next_timer_id;
             self.next_timer_id += 1;
             self.timers.push(Timer::new(None, timer_id));
@@ -465,11 +465,6 @@ fn draw_debug_box(frame: &mut Frame) {
         .style(Style::default().fg(Color::DarkGray))
         .direction(ListDirection::TopToBottom);
     
-    /*
-    let dbg_paragraph = Paragraph::new(debug_text.join("\n"))
-        .block(dbg_block)
-        .style(Style::default().fg(Color::DarkGray));
-     */
     frame.render_stateful_widget(dbg_list, dbg_area, &mut list_state);
 }
 
@@ -516,6 +511,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     mouse::enable_mouse()?;
     let mut terminal = ratatui::init();
     let mut state = State::new();
+
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+    
     // try to load persisted state on startup
     if let Ok(Some(persisted)) = State::load_from_disk() {
         state.resume_from_persisted(persisted).await;
@@ -624,7 +622,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if state.timers.len() < 12 {
+                            if state.timers.len() < 24 {
                                 state.add_timer();
                                 let idx = state.timers.len() - 1;
                                 let timer = &mut state.timers[idx];
